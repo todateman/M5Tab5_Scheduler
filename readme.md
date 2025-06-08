@@ -28,7 +28,7 @@ RTC（RX8130CE）を利用し、正確な時刻管理が可能です。
 
 - [M5Unified](https://github.com/m5stack/M5Unified)
 - [ArtronShop_RX8130CE](https://github.com/ArtronShop/ArtronShop_RX8130CE)
-- [CSV_Parser](https://github.com/michalmonday/CSV-Parser)
+- [CSV_Parser](https://github.com/michalmonday/CSV-Parser-for-Arduino/)
 
 ---
 
