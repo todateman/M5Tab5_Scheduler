@@ -21,12 +21,9 @@ const int SCREEN_WIDTH = 1280;
 const int SCREEN_HEIGHT = 720;
 
 M5Canvas canvas(&M5.Display);
-M5Canvas timeSprite(&M5.Display);
 
-const int TIME_SPRITE_X = 50;
-const int TIME_SPRITE_Y = 70;
-const int TIME_SPRITE_W = 1230;
-const int TIME_SPRITE_H = 235;
+const int TIME_TEXT_X = 50;
+const int TIME_TEXT_Y = 70;
 
 bool   firstDraw             = true;
 bool   prevTimeValid         = false;
@@ -333,8 +330,6 @@ void setup() {
   canvas.setFont(&fonts::lgfxJapanGothic_40);
   canvas.setTextSize(1);
 
-  timeSprite.createSprite(TIME_SPRITE_W, TIME_SPRITE_H);
-  timeSprite.setFont(&fonts::lgfxJapanGothic_40);
 
   // 初期化画面
   M5.Display.setCursor(50, 50);
@@ -392,14 +387,13 @@ void setup() {
   delay(3000); // 初期化メッセージを表示
 }
 
-//--- 現在時刻表示スプライト更新 ---
-static void updateTimeSprite(const String& datetime, bool time_valid) {
-  timeSprite.fillScreen(TFT_YELLOW);
-  timeSprite.setTextSize(3);
-  timeSprite.setCursor(0, 0);
-  timeSprite.setTextColor(time_valid ? TFT_BLACK : TFT_RED);
-  timeSprite.println("現在時刻:\n" + datetime);
-  timeSprite.pushSprite(TIME_SPRITE_X, TIME_SPRITE_Y);
+//--- 現在時刻を M5.Display に直接描画（背景色付きで前フレームを上書き）---
+static void drawTimeDirect(const String& datetime, bool time_valid) {
+  M5.Display.setFont(&fonts::lgfxJapanGothic_40);
+  M5.Display.setTextSize(3);
+  M5.Display.setCursor(TIME_TEXT_X, TIME_TEXT_Y);
+  M5.Display.setTextColor(time_valid ? TFT_BLACK : TFT_RED, TFT_YELLOW);
+  M5.Display.println("現在時刻:\n " + datetime);
 }
 
 void loop() {
@@ -452,7 +446,7 @@ void loop() {
     canvas.println("Tab5 スケジュール表示");
 
     canvas.setTextSize(3);
-    canvas.setCursor(TIME_SPRITE_X, TIME_SPRITE_Y);
+    canvas.setCursor(TIME_TEXT_X, TIME_TEXT_Y);
     canvas.setTextColor(time_valid ? TFT_BLACK : TFT_RED);
     canvas.println("現在時刻:\n " + datetime);
 
@@ -621,8 +615,8 @@ void loop() {
     prevFirstFutureStart  = firstFutureStart;
 
   } else {
-    // 時刻部分のみ小スプライトで更新
-    updateTimeSprite(datetime, time_valid);
+    // 時刻テキストのみ M5.Display に直接描画（背景色付きで前フレームを上書き）
+    drawTimeDirect(datetime, time_valid);
   }
 
   delay(1000);
