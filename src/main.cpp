@@ -20,6 +20,19 @@ bool wifi_ok = false;
 const int SCREEN_WIDTH = 1280;
 const int SCREEN_HEIGHT = 720;
 
+M5Canvas canvas(&M5.Display);
+M5Canvas timeSprite(&M5.Display);
+
+const int TIME_SPRITE_X = 50;
+const int TIME_SPRITE_Y = 70;
+const int TIME_SPRITE_W = 1230;
+const int TIME_SPRITE_H = 235;
+
+bool   firstDraw             = true;
+bool   prevTimeValid         = false;
+time_t prevFirstOngoingStart = 0;
+time_t prevFirstFutureStart  = 0;
+
 struct Schedule {
   time_t start;
   time_t stop;
@@ -315,7 +328,14 @@ void setup() {
   M5.Display.setTextColor(TFT_BLACK);
   M5.Display.setFont(&fonts::lgfxJapanGothic_40);
   M5.Display.setTextSize(1);
-  
+
+  canvas.createSprite(SCREEN_WIDTH, SCREEN_HEIGHT);
+  canvas.setFont(&fonts::lgfxJapanGothic_40);
+  canvas.setTextSize(1);
+
+  timeSprite.createSprite(TIME_SPRITE_W, TIME_SPRITE_H);
+  timeSprite.setFont(&fonts::lgfxJapanGothic_40);
+
   // 初期化画面
   M5.Display.setCursor(50, 50);
   M5.Display.println("Tab5 スケジュール表示");
@@ -372,18 +392,25 @@ void setup() {
   delay(3000); // 初期化メッセージを表示
 }
 
+//--- 現在時刻表示スプライト更新 ---
+static void updateTimeSprite(const String& datetime, bool time_valid) {
+  timeSprite.fillScreen(TFT_YELLOW);
+  timeSprite.setTextSize(3);
+  timeSprite.setCursor(0, 0);
+  timeSprite.setTextColor(time_valid ? TFT_BLACK : TFT_RED);
+  timeSprite.println("現在時刻:\n" + datetime);
+  timeSprite.pushSprite(TIME_SPRITE_X, TIME_SPRITE_Y);
+}
+
 void loop() {
   // シリアルからの時刻設定をチェック
-  handleSerialTimeSet();  
-
-  // 背景色
-  M5.Display.fillScreen(TFT_YELLOW);
+  handleSerialTimeSet();
 
   // 現在時刻取得
   String datetime;
   bool time_valid = false;
   time_t current_time = 0;
-  
+
   if (rtc_ok) {
     struct tm t;
     if (rtc.getTime(&t)) {
@@ -397,183 +424,205 @@ void loop() {
     datetime = "RTC未接続";
   }
 
-  //=== 画面描画 ===
-  
-  //--- タイトルと現在時刻（上部） ---
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(TFT_BLACK);
-  M5.Display.setCursor(50, 20);
-  M5.Display.println("Tab5 スケジュール表示");
-  
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(50, 70);
-  if (time_valid) {
-    M5.Display.setTextColor(TFT_BLACK);
-  } else {
-    M5.Display.setTextColor(TFT_RED);
-  }
-  M5.Display.println("現在時刻:\n " + datetime);
-
-  //--- ステータス表示 ---
-  M5.Display.setTextSize(0.8);
-  M5.Display.setCursor(900, 20);
-  if (rtc_ok) {
-    M5.Display.setTextColor(TFT_DARKGREEN);
-    M5.Display.print("RTC:OK  ");
-  } else {
-    M5.Display.setTextColor(TFT_RED);
-    M5.Display.print("RTC:NG  ");
+  // スケジュール変化を検出（最初の進行中・未来スケジュールの start で比較）
+  time_t firstOngoingStart = 0;
+  time_t firstFutureStart  = 0;
+  for (auto& s : schedules) {
+    if (time_valid && current_time >= s.start && current_time < s.stop) {
+      if (firstOngoingStart == 0) firstOngoingStart = s.start;
+    }
+    if (time_valid && s.start > current_time) {
+      if (firstFutureStart == 0) firstFutureStart = s.start;
+    }
   }
 
-  M5.Display.setCursor(900, 55);
-  if (sdcard_ok) {
-    M5.Display.setTextColor(TFT_DARKGREEN);
-    M5.Display.print("SDカード:OK  ");
-  } else {
-    M5.Display.setTextColor(TFT_RED);
-    M5.Display.print("SDカード:NG  ");
-  }
+  bool doFullDraw = firstDraw
+      || (time_valid != prevTimeValid)
+      || (firstOngoingStart != prevFirstOngoingStart)
+      || (firstFutureStart  != prevFirstFutureStart);
 
-  M5.Display.setCursor(900, 90);
-  if (wifi_ok) {
-    M5.Display.setTextColor(TFT_DARKGREEN);
-    M5.Display.print("Wi-Fi:OK  ");
-  } else {
-    M5.Display.setTextColor(TFT_ORANGE);
-    M5.Display.print("Wi-Fi:NG  ");
-  }
+  if (doFullDraw) {
+    //=== 全画面再描画（スケジュール変化時のみ）===
+    canvas.fillScreen(TFT_YELLOW);
 
-  M5.Display.setCursor(900, 125);
-  if (schedules.size() > 0) {
-    M5.Display.setTextColor(TFT_DARKGREEN);
-    M5.Display.print("スケジュール:" + String(schedules.size()) + "件");
-  }
+    //--- タイトルと現在時刻（上部） ---
+    canvas.setTextSize(1);
+    canvas.setTextColor(TFT_BLACK);
+    canvas.setCursor(50, 20);
+    canvas.println("Tab5 スケジュール表示");
 
-  if (sdcard_ok && schedules.size() > 0 && time_valid) {
-    //--- 進行中の予定 ---
-    int ongoing = 0;
-    String ongoingTimes[3];
-    String ongoingActions[3];
-    for (auto& s : schedules) {
-      if (current_time >= s.start && current_time < s.stop) {
-        if (ongoing < 3) {
-          // localtime()は静的メモリを使うため、結果をコピーして使用
-          struct tm* temp1 = localtime(&s.start);
-          struct tm start_tm = *temp1;  // 開始時刻をコピー
-          
-          struct tm* temp2 = localtime(&s.stop);
-          struct tm stop_tm = *temp2;   // 終了時刻をコピー
-          
-          char buf[32];
-          sprintf(buf, "%02d:%02d～%02d:%02d", 
-                  start_tm.tm_hour, start_tm.tm_min, 
-                  stop_tm.tm_hour, stop_tm.tm_min);
-          ongoingTimes[ongoing] = String(buf);
-          ongoingActions[ongoing] = s.action;
-          ongoing++;
+    canvas.setTextSize(3);
+    canvas.setCursor(TIME_SPRITE_X, TIME_SPRITE_Y);
+    canvas.setTextColor(time_valid ? TFT_BLACK : TFT_RED);
+    canvas.println("現在時刻:\n " + datetime);
+
+    //--- ステータス表示 ---
+    canvas.setTextSize(0.8);
+    canvas.setCursor(900, 20);
+    if (rtc_ok) {
+      canvas.setTextColor(TFT_DARKGREEN);
+      canvas.print("RTC:OK  ");
+    } else {
+      canvas.setTextColor(TFT_RED);
+      canvas.print("RTC:NG  ");
+    }
+
+    canvas.setCursor(900, 55);
+    if (sdcard_ok) {
+      canvas.setTextColor(TFT_DARKGREEN);
+      canvas.print("SDカード:OK  ");
+    } else {
+      canvas.setTextColor(TFT_RED);
+      canvas.print("SDカード:NG  ");
+    }
+
+    canvas.setCursor(900, 90);
+    if (wifi_ok) {
+      canvas.setTextColor(TFT_DARKGREEN);
+      canvas.print("Wi-Fi:OK  ");
+    } else {
+      canvas.setTextColor(TFT_ORANGE);
+      canvas.print("Wi-Fi:NG  ");
+    }
+
+    canvas.setCursor(900, 125);
+    if (schedules.size() > 0) {
+      canvas.setTextColor(TFT_DARKGREEN);
+      canvas.print("スケジュール:" + String(schedules.size()) + "件");
+    }
+
+    if (sdcard_ok && schedules.size() > 0 && time_valid) {
+      //--- 進行中の予定 ---
+      int ongoing = 0;
+      String ongoingTimes[3];
+      String ongoingActions[3];
+      for (auto& s : schedules) {
+        if (current_time >= s.start && current_time < s.stop) {
+          if (ongoing < 3) {
+            // localtime()は静的メモリを使うため、結果をコピーして使用
+            struct tm* temp1 = localtime(&s.start);
+            struct tm start_tm = *temp1;
+
+            struct tm* temp2 = localtime(&s.stop);
+            struct tm stop_tm = *temp2;
+
+            char buf[32];
+            sprintf(buf, "%02d:%02d～%02d:%02d",
+                    start_tm.tm_hour, start_tm.tm_min,
+                    stop_tm.tm_hour, stop_tm.tm_min);
+            ongoingTimes[ongoing] = String(buf);
+            ongoingActions[ongoing] = s.action;
+            ongoing++;
+          }
         }
       }
-    }
-    
-    M5.Display.setTextSize(1.2);
-    M5.Display.setTextColor(TFT_RED);
-    M5.Display.setCursor(50, 310);
-    M5.Display.println("【進行中の予定】");
-    
-    if (ongoing == 0) {
-      M5.Display.setTextSize(1);
-      M5.Display.setTextColor(TFT_BLACK);
-      M5.Display.setCursor(50, 360);
-      M5.Display.println("現在進行中の予定はありません");
+
+      canvas.setTextSize(1.2);
+      canvas.setTextColor(TFT_RED);
+      canvas.setCursor(50, 310);
+      canvas.println("【進行中の予定】");
+
+      if (ongoing == 0) {
+        canvas.setTextSize(1);
+        canvas.setTextColor(TFT_BLACK);
+        canvas.setCursor(50, 360);
+        canvas.println("現在進行中の予定はありません");
+      } else {
+        for (int i = 0; i < ongoing; ++i) {
+          canvas.setTextSize(0.9);
+          canvas.setTextColor(TFT_PURPLE);
+          canvas.setCursor(70, 360 + i * 70);
+          canvas.println(ongoingTimes[i]);
+
+          canvas.setTextSize(1);
+          canvas.setTextColor(TFT_BLACK);
+          canvas.setCursor(70, 360 + i * 70 + 30);
+          canvas.println("・" + ongoingActions[i]);
+        }
+      }
+
+      //--- 未来の予定 ---
+      int future = 0;
+      String futureTimes[8];
+      String futureActions[8];
+      for (auto& s : schedules) {
+        if (s.start > current_time && future < 8) {
+          // localtime()は静的メモリを使うため、結果をコピーして使用
+          struct tm* temp1 = localtime(&s.start);
+          struct tm start_tm = *temp1;
+
+          struct tm* temp2 = localtime(&s.stop);
+          struct tm stop_tm = *temp2;
+
+          char buf[32];
+          sprintf(buf, "%02d:%02d～%02d:%02d",
+                  start_tm.tm_hour, start_tm.tm_min,
+                  stop_tm.tm_hour, stop_tm.tm_min);
+          futureTimes[future] = String(buf);
+          futureActions[future++] = s.action;
+        }
+      }
+
+      canvas.setTextSize(1.2);
+      canvas.setTextColor(TFT_BLUE);
+      canvas.setCursor(690, 310);
+      canvas.println("【今後の予定】");
+
+      for (int i = 0; i < future && i < 4; ++i) {
+        canvas.setTextSize(0.9);
+        canvas.setTextColor(TFT_PURPLE);
+        canvas.setCursor(710, 360 + i * 70);
+        canvas.println(futureTimes[i]);
+
+        canvas.setTextSize(1);
+        canvas.setTextColor(TFT_BLACK);
+        canvas.setCursor(710, 360 + i * 70 + 30);
+        canvas.println("・" + futureActions[i]);
+      }
+
+      if (future > 4) {
+        canvas.setTextSize(0.8);
+        canvas.setTextColor(TFT_DARKGRAY);
+        canvas.setCursor(710, 670);
+        canvas.println("...他 " + String(future - 6) + " 件");
+      }
+
     } else {
-      for (int i = 0; i < ongoing; ++i) {
-        // 時刻
-        M5.Display.setTextSize(0.9);
-        M5.Display.setTextColor(TFT_PURPLE);
-        M5.Display.setCursor(70, 360 + i * 70);
-        M5.Display.println(ongoingTimes[i]);
-      
-        // 予定名
-        M5.Display.setTextSize(1);
-        M5.Display.setTextColor(TFT_BLACK);
-        M5.Display.setCursor(70, 360 + i * 70 + 30);
-        M5.Display.println("・" + ongoingActions[i]);
+      // エラーメッセージ表示
+      canvas.setTextSize(2);
+      canvas.setCursor(50, 310);
+      if (!rtc_ok) {
+        canvas.setTextColor(TFT_RED);
+        canvas.println("RTCエラー");
+        canvas.setCursor(50, 360);
+        canvas.setTextSize(1);
+        canvas.println("シリアルで時刻設定してください");
+        canvas.setCursor(50, 400);
+        canvas.println("例: 2025/06/14 08:30:00");
+      } else if (!sdcard_ok) {
+        canvas.setTextColor(TFT_RED);
+        canvas.println("SDカードを確認してください");
+      } else if (schedules.size() == 0) {
+        canvas.setTextColor(TFT_ORANGE);
+        canvas.println("スケジュールファイルを確認");
+        canvas.setCursor(50, 360);
+        canvas.setTextSize(1);
+        canvas.println("・schedule.csvが存在するか");
+        canvas.setCursor(50, 400);
+        canvas.println("・CSV形式が正しいか");
       }
     }
 
-    //--- 未来の予定 ---
-    int future = 0;
-    String futureTimes[8];
-    String futureActions[8];
-    for (auto& s : schedules) {
-      if (s.start > current_time && future < 8) {
-        // localtime()は静的メモリを使うため、結果をコピーして使用
-        struct tm* temp1 = localtime(&s.start);
-        struct tm start_tm = *temp1;  // 開始時刻をコピー
-        
-        struct tm* temp2 = localtime(&s.stop);
-        struct tm stop_tm = *temp2;   // 終了時刻をコピー
-        
-        char buf[32];
-        sprintf(buf, "%02d:%02d～%02d:%02d", 
-                start_tm.tm_hour, start_tm.tm_min, 
-                stop_tm.tm_hour, stop_tm.tm_min);
-        futureTimes[future] = String(buf);
-        futureActions[future++] = s.action;
-      }
-    }
-    
-    M5.Display.setTextSize(1.2);
-    M5.Display.setTextColor(TFT_BLUE);
-    M5.Display.setCursor(690, 310);
-    M5.Display.println("【今後の予定】");
-    
-    for (int i = 0; i < future && i < 4; ++i) {  // 最大4件表示
-      // 時刻
-      M5.Display.setTextSize(0.9);
-      M5.Display.setTextColor(TFT_PURPLE);
-      M5.Display.setCursor(710, 360 + i * 70);
-      M5.Display.println(futureTimes[i]);
-      
-      // 予定名
-      M5.Display.setTextSize(1);
-      M5.Display.setTextColor(TFT_BLACK);
-      M5.Display.setCursor(710, 360 + i * 70 + 30);
-      M5.Display.println("・" + futureActions[i]);
-    }
-    
-    // 残りの予定がある場合
-    if (future > 4) {
-      M5.Display.setTextSize(0.8);
-      M5.Display.setTextColor(TFT_DARKGRAY);
-      M5.Display.setCursor(710, 670);
-      M5.Display.println("...他 " + String(future - 6) + " 件");
-    }
-    
+    canvas.pushSprite(0, 0);
+
+    firstDraw             = false;
+    prevTimeValid         = time_valid;
+    prevFirstOngoingStart = firstOngoingStart;
+    prevFirstFutureStart  = firstFutureStart;
+
   } else {
-    // エラーメッセージ表示
-    M5.Display.setTextSize(2);
-    M5.Display.setCursor(50, 310);
-    if (!rtc_ok) {
-      M5.Display.setTextColor(TFT_RED);
-      M5.Display.println("RTCエラー");
-      M5.Display.setCursor(50, 360);
-      M5.Display.setTextSize(1);
-      M5.Display.println("シリアルで時刻設定してください");
-      M5.Display.setCursor(50, 400);
-      M5.Display.println("例: 2025/06/14 08:30:00");
-    } else if (!sdcard_ok) {
-      M5.Display.setTextColor(TFT_RED);
-      M5.Display.println("SDカードを確認してください");
-    } else if (schedules.size() == 0) {
-      M5.Display.setTextColor(TFT_ORANGE);
-      M5.Display.println("スケジュールファイルを確認");
-      M5.Display.setCursor(50, 360);
-      M5.Display.setTextSize(1);
-      M5.Display.println("・schedule.csvが存在するか");
-      M5.Display.setCursor(50, 400);
-      M5.Display.println("・CSV形式が正しいか");
-    }
+    // 時刻部分のみ小スプライトで更新
+    updateTimeSprite(datetime, time_valid);
   }
 
   delay(1000);
