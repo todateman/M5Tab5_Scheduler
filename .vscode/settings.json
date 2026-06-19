@@ -2,5 +2,9 @@
     "files.associations": {
         "chrono": "cpp",
         "ostream": "cpp"
+    },
+    "chat.tools.terminal.autoApprove": {
+        "/Users/tomohirokusu/.platformio/penv/bin/pio": true,
+        "~/.platformio/penv/bin/pio": true
     }
 }

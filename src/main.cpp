@@ -1,10 +1,12 @@
 #include <Arduino.h>
 #include <M5Unified.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <SD_MMC.h>
 #include <CSV_Parser.h>
 #include <Wire.h>
 #include <ArtronShop_RX8130CE.h>
+#include <esp_sntp.h>
 
 //==================== 定数・マクロ ====================
 const char* SCHEDULE_FILE = "/schedule.csv";
@@ -13,6 +15,7 @@ const char* SCHEDULE_FILE = "/schedule.csv";
 ArtronShop_RX8130CE rtc(&Wire);
 bool rtc_ok = false;
 bool sdcard_ok = false;
+bool wifi_ok = false;
 
 const int SCREEN_WIDTH = 1280;
 const int SCREEN_HEIGHT = 720;
@@ -174,13 +177,92 @@ void loadSchedules() {
   }
 }
 
+//--- NTP同期 ---
+bool syncNTP() {
+  // JST (UTC+9) をPOSIX形式で指定してNTP同期開始
+  configTzTime("JST-9", "ntp.nict.jp", "pool.ntp.org");
+
+  // NTPが実際に同期完了するまで待機（最大10秒）
+  for (int i = 0; i < 20; i++) {
+    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+      break;
+    }
+    delay(500);
+  }
+
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    if (rtc_ok) {
+      rtc.setTime(timeinfo);
+    }
+    Serial.println("NTP同期成功: " + formatDateTime(timeinfo));
+    return true;
+  }
+  return false;
+}
+
+//--- Wi-Fi初期化とNTP同期 ---
+void initWiFi() {
+  // M5Tab5のWiFi (ESP32-C6) はSDIO2に接続されているためピン指定が必須
+  // CLK=12, CMD=13, D0=11, D1=10, D2=9, D3=8, RST=15
+  WiFi.setPins(12, 13, 11, 10, 9, 8, 15);
+
+  // パニックリセット後はスキップ（フェイルセーフ）
+  esp_reset_reason_t reason = esp_reset_reason();
+  if (reason == ESP_RST_PANIC || reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT) {
+    Serial.println("Wi-Fi: パニックリセット後 - スキップ");
+    WiFi.mode(WIFI_OFF);
+    M5.Display.setCursor(50, 150);
+    M5.Display.setTextColor(TFT_ORANGE);
+    M5.Display.println("Wi-Fi: 前回クラッシュ - スキップ");
+    return;
+  }
+
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180);
+
+  M5.Display.setCursor(50, 150);
+  M5.Display.setTextColor(TFT_BLACK);
+  M5.Display.println("Wi-Fi接続中... (SSID: M5Tab5_Setup)");
+
+  if (wm.autoConnect("M5Tab5_Setup")) {
+    wifi_ok = true;
+    Serial.println("Wi-Fi接続成功: " + WiFi.localIP().toString());
+
+    M5.Display.setCursor(50, 200);
+    M5.Display.setTextColor(TFT_DARKGREEN);
+    M5.Display.println("Wi-Fi接続成功: " + WiFi.localIP().toString());
+
+    M5.Display.setCursor(50, 250);
+    M5.Display.setTextColor(TFT_BLACK);
+    M5.Display.println("NTP時刻同期中...");
+
+    if (syncNTP()) {
+      M5.Display.setCursor(50, 300);
+      M5.Display.setTextColor(TFT_DARKGREEN);
+      M5.Display.println("NTP同期成功 - RTC更新済み");
+    } else {
+      Serial.println("NTP同期失敗 - RTC時刻を使用");
+      M5.Display.setCursor(50, 300);
+      M5.Display.setTextColor(TFT_ORANGE);
+      M5.Display.println("NTP同期失敗 - RTC時刻を使用");
+    }
+  } else {
+    Serial.println("Wi-Fi接続失敗 - RTC時刻を使用");
+    WiFi.mode(WIFI_OFF);
+    M5.Display.setCursor(50, 200);
+    M5.Display.setTextColor(TFT_ORANGE);
+    M5.Display.println("Wi-Fi接続失敗 - RTC時刻を使用");
+  }
+}
+
+//--- SDカード初期化 ---
 void initSDCard() {
   Serial.println("SD_MMCでSDカード初期化開始...");
-  
-  // SD_MMCモードで初期化（1ビットモード）
+
   if (!SD_MMC.begin("/sdcard", true)) {  // true = 1-bit mode
     Serial.println("SD_MMC 1ビットモード失敗");
-    
+
     // 4ビットモードで再試行
     if (!SD_MMC.begin("/sdcard", false)) {  // false = 4-bit mode
       Serial.println("SD_MMC 4ビットモード失敗");
@@ -219,7 +301,11 @@ void initSDCard() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  
+
+  // タイムゾーンをJSTに固定（NTP/WiFi未接続時も有効）
+  setenv("TZ", "JST-9", 1);
+  tzset();
+
   auto cfg = M5.config();
   M5.begin(cfg);
   
@@ -236,52 +322,43 @@ void setup() {
   M5.Display.setCursor(50, 100);
   M5.Display.println("初期化中...");
 
-  // Wi-Fiを完全に無効化
-  WiFi.mode(WIFI_OFF);
-  Serial.println("Wi-Fi無効化完了");
-
   // RTC初期化
-  M5.Display.setCursor(50, 150);
-  M5.Display.println("RTC初期化中...");
   initRTC();
-  
+
   if (rtc_ok) {
-    M5.Display.setCursor(50, 200);
-    M5.Display.setTextColor(TFT_DARKGREEN);
-    M5.Display.println("RTC初期化成功");
-  } else {
-    M5.Display.setCursor(50, 200);
-    M5.Display.setTextColor(TFT_RED);
-    M5.Display.println("RTC初期化失敗");
+    Serial.println("RTC初期化成功");
   }
 
+  // Wi-Fi + NTP
+  initWiFi();
+
   // SDカード初期化
-  M5.Display.setCursor(50, 250);
+  M5.Display.setCursor(50, 350);
   M5.Display.setTextColor(TFT_BLACK);
   M5.Display.println("SDカード初期化中...");
   initSDCard();
-  
+
   if (sdcard_ok) {
-    M5.Display.setCursor(50, 300);
+    M5.Display.setCursor(50, 400);
     M5.Display.setTextColor(TFT_DARKGREEN);
     M5.Display.println("SDカード初期化成功");
-    
-    M5.Display.setCursor(50, 350);
+
+    M5.Display.setCursor(50, 450);
     M5.Display.setTextColor(TFT_BLACK);
     M5.Display.println("スケジュール読み込み中...");
     loadSchedules();
-    
+
     if (schedules.size() > 0) {
-      M5.Display.setCursor(50, 400);
+      M5.Display.setCursor(50, 500);
       M5.Display.setTextColor(TFT_DARKGREEN);
       M5.Display.println("スケジュール読み込み成功: " + String(schedules.size()) + "件");
     } else {
-      M5.Display.setCursor(50, 400);
+      M5.Display.setCursor(50, 500);
       M5.Display.setTextColor(TFT_ORANGE);
       M5.Display.println("スケジュールが見つかりません");
     }
   } else {
-    M5.Display.setCursor(50, 300);
+    M5.Display.setCursor(50, 400);
     M5.Display.setTextColor(TFT_RED);
     M5.Display.println("SDカード初期化失敗");
   }
@@ -358,8 +435,13 @@ void loop() {
   }
 
   M5.Display.setCursor(900, 90);
-  M5.Display.setTextColor(TFT_BLUE);
-  M5.Display.print("Wi-Fi:無効  ");
+  if (wifi_ok) {
+    M5.Display.setTextColor(TFT_DARKGREEN);
+    M5.Display.print("Wi-Fi:OK  ");
+  } else {
+    M5.Display.setTextColor(TFT_ORANGE);
+    M5.Display.print("Wi-Fi:NG  ");
+  }
 
   M5.Display.setCursor(900, 125);
   if (schedules.size() > 0) {
