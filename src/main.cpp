@@ -12,10 +12,13 @@
 const char* SCHEDULE_FILE = "/schedule.csv";
 
 // Tab5 RTC設定
-ArtronShop_RX8130CE rtc(&Wire);
+ArtronShop_RX8130CE rtc(&Wire1);
 bool rtc_ok = false;
 bool sdcard_ok = false;
 bool wifi_ok = false;
+bool standalone_mode = false;
+int future_scroll_offset = 0;
+LGFX_Button btn_time_set, btn_scroll_up, btn_scroll_down;
 
 const int SCREEN_WIDTH = 1280;
 const int SCREEN_HEIGHT = 720;
@@ -75,12 +78,174 @@ time_t getCurrentUnixTime() {
   return mktime(&t);
 }
 
+//--- RTC時刻が有効（2020年以降）かチェック ---
+bool isRTCTimeValid() {
+  if (!rtc_ok) return false;
+  struct tm t;
+  if (!rtc.getTime(&t)) return false;
+  return (t.tm_year + 1900) >= 2020;
+}
+
+//--- 起動モード選択画面（5秒でスタンドアロンへ自動移行）---
+void showModeSelectionScreen() {
+  M5.Display.fillScreen(TFT_YELLOW);
+  M5.Display.setFont(&fonts::lgfxJapanGothic_40);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_BLACK);
+  M5.Display.setCursor(50, 30);
+  M5.Display.println("Tab5 スケジュール表示 - 起動モード選択");
+
+  // ボタン定義（cx/cy はセンター座標）
+  LGFX_Button btn_wifi, btn_sa;
+  btn_wifi.initButton(&M5.Display, 350, 350, 400, 200, TFT_DARKCYAN, TFT_CYAN,      TFT_BLACK, "", 1.0f);
+  btn_sa.initButton(  &M5.Display, 930, 350, 400, 200, TFT_DARKGRAY, TFT_LIGHTGRAY, TFT_BLACK, "", 1.0f);
+  btn_wifi.drawButton();
+  btn_sa.drawButton();
+
+  // 日本語ラベル（LGFX_Buttonのlabelはボタン描画後に上書き）
+  M5.Display.setTextSize(1);   M5.Display.setTextColor(TFT_BLACK);
+  M5.Display.setCursor(220, 315); M5.Display.println("Wi-Fi接続");
+  M5.Display.setTextSize(0.7);
+  M5.Display.setCursor(195, 375); M5.Display.println("(NTP時刻同期)");
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(760, 315); M5.Display.println("スタンドアロン");
+  M5.Display.setTextSize(0.7);
+  M5.Display.setCursor(775, 375); M5.Display.println("(RTC時刻使用)");
+
+  for (int countdown = 5; countdown > 0; countdown--) {
+    M5.Display.fillRect(0, 500, SCREEN_WIDTH, 80, TFT_YELLOW);
+    M5.Display.setTextSize(0.8);
+    M5.Display.setTextColor(TFT_DARKGRAY);
+    M5.Display.setCursor(300, 510);
+    M5.Display.println(String(countdown) + " 秒後に自動でスタンドアロンモードで起動します...");
+
+    for (int i = 0; i < 20; i++) {  // 50ms × 20 = 1秒
+      M5.update();
+      auto td = M5.Touch.getDetail();
+      bool p = td.isPressed();
+      btn_wifi.press(p && btn_wifi.contains(td.x, td.y));
+      btn_sa.press(p   && btn_sa.contains(td.x, td.y));
+
+      if (btn_wifi.justPressed()) {
+        standalone_mode = false;
+        btn_wifi.drawButton(true);
+        delay(400);
+        return;
+      }
+      if (btn_sa.justPressed()) {
+        standalone_mode = true;
+        btn_sa.drawButton(true);
+        delay(400);
+        return;
+      }
+      delay(50);
+    }
+  }
+  standalone_mode = true;  // タイムアウト → スタンドアロン
+}
+
+//--- タッチ操作による時刻設定画面 ---
+void showTimeSetScreen() {
+  struct tm t = {};
+  if (rtc_ok) {
+    rtc.getTime(&t);
+  } else {
+    t.tm_year = 2025 - 1900;
+    t.tm_mon  = 5;
+    t.tm_mday = 1;
+    t.tm_hour = 0;
+    t.tm_min  = 0;
+    t.tm_sec  = 0;
+  }
+
+  const char* labels[] = { "年", "月", "日", "時", "分", "秒" };
+  int* fields[] = { &t.tm_year, &t.tm_mon, &t.tm_mday, &t.tm_hour, &t.tm_min, &t.tm_sec };
+  int mins[]    = { 100, 0, 1, 0, 0, 0 };
+  int maxs[]    = { 200, 11, 31, 23, 59, 59 };
+
+  // ボタン初期化（cx/cy はセンター座標）
+  LGFX_Button btns_m[6], btns_p[6], btn_ok;
+  for (int i = 0; i < 6; i++) {
+    int cy = 120 + i * 90 + 35;
+    btns_m[i].initButton(&M5.Display, 595, cy, 90, 70, TFT_WHITE, TFT_NAVY,      TFT_WHITE, "-", 1.5f);
+    btns_p[i].initButton(&M5.Display, 725, cy, 90, 70, TFT_WHITE, TFT_NAVY,      TFT_WHITE, "+", 1.5f);
+  }
+  btn_ok.initButton(&M5.Display, 640, 678, 400, 60, TFT_WHITE, TFT_DARKGREEN, TFT_WHITE, "", 1.0f);
+
+  auto drawUI = [&]() {
+    M5.Display.fillScreen(0x2104);
+    M5.Display.setFont(&fonts::lgfxJapanGothic_40);
+    M5.Display.setTextSize(1.2);
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setCursor(500, 30);
+    M5.Display.println("時刻設定");
+
+    for (int i = 0; i < 6; i++) {
+      int rowY = 120 + i * 90;
+      M5.Display.setTextSize(1);
+      M5.Display.setTextColor(TFT_LIGHTGRAY);
+      M5.Display.setCursor(200, rowY + 10);
+      M5.Display.print(labels[i]); M5.Display.print(":");
+
+      int dispVal = (i == 0) ? *fields[i] + 1900 : (i == 1) ? *fields[i] + 1 : *fields[i];
+      char valBuf[8];
+      sprintf(valBuf, (i == 0) ? "%4d" : "%2d", dispVal);
+      M5.Display.setTextSize(1.2);
+      M5.Display.setTextColor(TFT_WHITE);
+      M5.Display.setCursor(350, rowY + 5);
+      M5.Display.print(valBuf);
+
+      btns_m[i].drawButton();
+      btns_p[i].drawButton();
+    }
+    btn_ok.drawButton();
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setCursor(490, 665);
+    M5.Display.println("確定・RTC保存");
+  };
+
+  drawUI();
+
+  while (true) {
+    M5.update();
+    auto td  = M5.Touch.getDetail();
+    bool p   = td.isPressed();
+
+    for (int i = 0; i < 6; i++) {
+      btns_m[i].press(p && btns_m[i].contains(td.x, td.y));
+      btns_p[i].press(p && btns_p[i].contains(td.x, td.y));
+    }
+    btn_ok.press(p && btn_ok.contains(td.x, td.y));
+
+    bool changed = false;
+    for (int i = 0; i < 6; i++) {
+      if (btns_m[i].justPressed() && *fields[i] > mins[i]) { (*fields[i])--; changed = true; }
+      if (btns_p[i].justPressed() && *fields[i] < maxs[i]) { (*fields[i])++; changed = true; }
+    }
+    if (changed) { drawUI(); delay(150); continue; }
+
+    if (btn_ok.justPressed()) {
+      t.tm_isdst = -1;
+      if (rtc_ok) {
+        rtc.setTime(t);
+        Serial.println("RTC時刻を設定しました: " + formatDateTime(t));
+      }
+      time_t ts = mktime(&t);
+      struct timeval tv = { ts, 0 };
+      settimeofday(&tv, nullptr);
+      break;
+    }
+    delay(50);
+  }
+}
+
 //--- RTCの初期化 ---
 void initRTC() {
   Serial.println("RTC初期化開始...");
   
   // Tab5のI2Cピン設定
-  Wire.begin(31, 32);  // SDA=31, SCL=32
+  Wire1.begin(31, 32);  // SDA=31, SCL=32 (Wire1=I2C1, Wire0はタッチコントローラー用に確保)
   
   if (!rtc.begin()) {
     Serial.println("RTC初期化失敗 - RX8130CEが見つかりません");
@@ -213,6 +378,12 @@ bool syncNTP() {
 
 //--- Wi-Fi初期化とNTP同期 ---
 void initWiFi() {
+  if (standalone_mode) {
+    Serial.println("スタンドアロンモード: Wi-Fiスキップ");
+    WiFi.mode(WIFI_OFF);
+    return;
+  }
+
   // M5Tab5のWiFi (ESP32-C6) はSDIO2に接続されているためピン指定が必須
   // CLK=12, CMD=13, D0=11, D1=10, D2=9, D3=8, RST=15
   WiFi.setPins(12, 13, 11, 10, 9, 8, 15);
@@ -330,6 +501,11 @@ void setup() {
   canvas.setFont(&fonts::lgfxJapanGothic_40);
   canvas.setTextSize(1);
 
+  // メイン画面タッチボタン初期化（cx/cy はセンター座標）
+  btn_time_set.initButton(  &canvas, 130,  685,  220, 55, TFT_DARKGRAY, TFT_LIGHTGRAY, TFT_BLACK, "", 1.0f);
+  btn_scroll_up.initButton( &canvas, 1235, 383,   60, 60, TFT_DARKGRAY, TFT_DARKGRAY,  TFT_WHITE, "^", 1.0f);
+  btn_scroll_down.initButton(&canvas, 1235, 623,  60, 60, TFT_DARKGRAY, TFT_DARKGRAY,  TFT_WHITE, "v", 1.0f);
+
 
   // 初期化画面
   M5.Display.setCursor(50, 50);
@@ -344,8 +520,16 @@ void setup() {
     Serial.println("RTC初期化成功");
   }
 
-  // Wi-Fi + NTP
+  // 起動モード選択（5秒でスタンドアロン自動移行）
+  showModeSelectionScreen();
+
+  // Wi-Fi + NTP（スタンドアロンモード時はスキップ）
   initWiFi();
+
+  // スタンドアロンモードかつRTC時刻が未設定の場合は時刻設定を促す
+  if (standalone_mode && !isRTCTimeValid()) {
+    showTimeSetScreen();
+  }
 
   // SDカード初期化
   M5.Display.setCursor(50, 350);
@@ -562,24 +746,43 @@ void loop() {
       canvas.setCursor(690, 310);
       canvas.println("【今後の予定】");
 
-      for (int i = 0; i < future && i < 4; ++i) {
+      // スクロール範囲クランプ
+      int maxOffset = (future > 4) ? (future - 4) : 0;
+      if (future_scroll_offset > maxOffset) future_scroll_offset = maxOffset;
+      if (future_scroll_offset < 0) future_scroll_offset = 0;
+
+      for (int i = 0; i < 4 && (future_scroll_offset + i) < future; ++i) {
+        int idx = future_scroll_offset + i;
         canvas.setTextSize(0.9);
         canvas.setTextColor(TFT_PURPLE);
         canvas.setCursor(710, 360 + i * 70);
-        canvas.println(futureTimes[i]);
+        canvas.println(futureTimes[idx]);
 
         canvas.setTextSize(1);
         canvas.setTextColor(TFT_BLACK);
         canvas.setCursor(710, 360 + i * 70 + 30);
-        canvas.println("・" + futureActions[i]);
+        canvas.println("・" + futureActions[idx]);
       }
 
-      if (future > 4) {
-        canvas.setTextSize(0.8);
-        canvas.setTextColor(TFT_DARKGRAY);
-        canvas.setCursor(710, 670);
-        canvas.println("...他 " + String(future - 6) + " 件");
+      // ▲▼スクロールボタン（右端）
+      if (future_scroll_offset > 0) {
+        btn_scroll_up.drawButton();
       }
+      if (future_scroll_offset < maxOffset) {
+        btn_scroll_down.drawButton();
+        canvas.setTextSize(0.7);
+        canvas.setTextColor(TFT_DARKGRAY);
+        canvas.setCursor(690, 665);
+        canvas.println("他 " + String(future - future_scroll_offset - 4) + " 件");
+      }
+
+      // 時刻設定ボタン（左下）
+      btn_time_set.drawButton();
+      canvas.setTextColor(TFT_BLACK);
+      canvas.setTextSize(0.8);
+      canvas.setCursor(40, 672);
+      canvas.println("時刻設定");
+
 
     } else {
       // エラーメッセージ表示
@@ -590,9 +793,9 @@ void loop() {
         canvas.println("RTCエラー");
         canvas.setCursor(50, 360);
         canvas.setTextSize(1);
-        canvas.println("シリアルで時刻設定してください");
+        canvas.println("左下「時刻設定」ボタンで設定できます");
         canvas.setCursor(50, 400);
-        canvas.println("例: 2025/06/14 08:30:00");
+        canvas.println("またはシリアル: 2025/06/14 08:30:00");
       } else if (!sdcard_ok) {
         canvas.setTextColor(TFT_RED);
         canvas.println("SDカードを確認してください");
@@ -619,7 +822,33 @@ void loop() {
     drawTimeDirect(datetime, time_valid);
   }
 
-  delay(1000);
+  // 1秒間タッチ入力をポーリング（100ms × 10回）
+  for (int i = 0; i < 10; i++) {
+    M5.update();
+    auto td = M5.Touch.getDetail();
+    bool p  = td.isPressed();
+
+    btn_time_set.press(  p && btn_time_set.contains(td.x, td.y));
+    btn_scroll_up.press( p && btn_scroll_up.contains(td.x, td.y));
+    btn_scroll_down.press(p && btn_scroll_down.contains(td.x, td.y));
+
+    if (btn_time_set.justPressed()) {
+      showTimeSetScreen();
+      firstDraw = true;
+      break;
+    }
+    if (btn_scroll_up.justPressed() && future_scroll_offset > 0) {
+      future_scroll_offset--;
+      firstDraw = true;
+      break;
+    }
+    if (btn_scroll_down.justPressed()) {
+      future_scroll_offset++;
+      firstDraw = true;
+      break;
+    }
+    delay(100);
+  }
 }
 
 /* 
