@@ -39,6 +39,8 @@ std::vector<Schedule> schedules;
 //--- シリアル時刻設定用のバッファ ---
 String serialBuffer = "";
 
+void handleSerialTimeSet();
+
 //==================== テーマ ====================
 // uint32_t の色は RGB888 として扱われる
 constexpr uint32_t C_BG        = 0xF1F5F9;
@@ -382,6 +384,7 @@ void showModeSelectionScreen() {
 
   uint32_t start = millis(), lastDraw = start;
   while (millis() - start < TIMEOUT_MS) {
+    handleSerialTimeSet();
     M5.update();
     auto td = M5.Touch.getDetail();
     if (td.wasPressed()) {
@@ -496,6 +499,7 @@ void showTimeSetScreen() {
   uint32_t holdStart = 0, lastRepeat = 0;
 
   while (true) {
+    handleSerialTimeSet();
     M5.update();
     auto td = M5.Touch.getDetail();
 
@@ -580,7 +584,23 @@ void initRTC() {
   Serial.println("シリアルで時刻設定: YYYY/MM/DD HH:MM:SS");
 }
 
-//--- シリアルから時刻設定 ---
+//--- 表示中の画面を PNG にしてシリアルへ送る（受信側: tools/screenshot.py）---
+static void sendScreenshot() {
+  size_t len = 0;
+  void* png = M5.Display.createPng(&len, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+  if (png == nullptr) {
+    Serial.println("SCREENSHOT:ERROR");
+    return;
+  }
+  Serial.flush();
+  Serial.printf("\nSCREENSHOT:BEGIN %u\n", (unsigned)len);
+  Serial.write((const uint8_t*)png, len);
+  Serial.println("\nSCREENSHOT:END");
+  Serial.flush();
+  free(png);
+}
+
+//--- シリアルから時刻設定・スクリーンショット要求 ---
 void handleSerialTimeSet() {
   while (Serial.available()) {
     char c = Serial.read();
@@ -588,7 +608,10 @@ void handleSerialTimeSet() {
       if (serialBuffer.length() > 0) {
         // "2025/06/14 08:30:00" 形式で解析
         int year, month, day, hour, minute, second;
-        if (sscanf(serialBuffer.c_str(), "%d/%d/%d %d:%d:%d",
+        serialBuffer.trim();
+        if (serialBuffer == "screenshot") {
+          sendScreenshot();
+        } else if (sscanf(serialBuffer.c_str(), "%d/%d/%d %d:%d:%d",
                    &year, &month, &day, &hour, &minute, &second) == 6) {
 
           if (rtc_ok) {
@@ -856,6 +879,7 @@ void setup() {
   Serial.println("シリアルで以下の形式で時刻を送信してください:");
   Serial.println("YYYY/MM/DD HH:MM:SS");
   Serial.println("例: 2025/06/14 08:30:00");
+  Serial.println("画面のスクリーンショット: screenshot（tools/screenshot.py で受信）");
 
   delay(2000); // 初期化結果を表示
 }

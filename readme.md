@@ -5,6 +5,8 @@
 M5Stack Tab5（ESP32-P4）上で、SDカードからCSV形式のスケジュールを読み込み、現在時刻・進行中・今後の予定を大画面に表示するシステムです。  
 ネットワーク不要のスタンドアロンモードで動作でき、タッチパネルから直接時刻設定が可能です。Wi-Fi接続時はNTPサーバと自動時刻同期し、RTC（RX8130CE）に書き込むことで電源断後も正確な時刻を保持します。
 
+![メイン画面](docs/screenshot_main.png)
+
 ---
 
 ## 特徴
@@ -115,6 +117,41 @@ SDカード初期化 → スケジュール読み込み
 | 上段（全幅） | 現在時刻（特大の HH:MM＋秒）と年・月日・曜日 |
 | 下段左 | 進行中の予定（最大3件、残り時間・進捗バー付き） |
 | 下段右 | 次の予定（2件ずつ、▲▼でスクロール、今日以外は日付付き） |
+
+| 起動モード選択 | 起動完了 |
+| --- | --- |
+| ![起動モード選択画面](docs/screenshot_mode.png) | ![起動画面](docs/screenshot_boot.png) |
+| **メイン画面** | **時刻設定** |
+| ![メイン画面](docs/screenshot_main.png) | ![時刻設定画面](docs/screenshot_timeset.png) |
+
+> 画像は `src/main.cpp` を PC 上で動かして描画した擬似スクリーンショットです（2026/10/24 13:50 時点、`microsd/schedule.csv` 使用）。
+
+---
+
+## スクリーンショットの作成
+
+### PC で擬似的に作成（実機不要）
+
+`src/main.cpp` を M5GFX の PC 向けビルド（SDL 版）でそのまま動かし、`setup()` → `loop()` を仮想時刻で進めながら各画面を `createPng()` で保存します。Wi-Fi・SD・RTC・タッチは `tools/sim/stubs/` のスタブで置き換えています。
+
+```sh
+brew install sdl2                 # 初回のみ（macOS）
+./tools/sim/build.sh              # docs/screenshot_*.png を出力
+./tools/sim/build.sh "2026/10/25 12:40:00"   # 表示する時刻を指定
+```
+
+M5GFX は PlatformIO が取得した `.pio/libdeps` のものを使うため、先に一度 `pio run` でビルドしておいてください。
+
+### 実機の画面を保存
+
+シリアルで `screenshot` を送ると、表示中の画面を PNG にして返します（M5GFX の `createPng()`）。
+
+```sh
+~/.platformio/penv/bin/python tools/screenshot.py /dev/cu.usbmodem101 docs/screenshot_main.png
+# 再起動して起動モード選択画面を撮る
+~/.platformio/penv/bin/python tools/screenshot.py /dev/cu.usbmodem101 docs/screenshot_mode.png \
+    --reboot --wait-for "シリアルで時刻設定" --delay 1.0
+```
 
 ---
 
